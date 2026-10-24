@@ -1,0 +1,298 @@
+library(mice)
+library(ggplot2)
+library(caret)
+set.seed(54)
+
+## importing data sets ####
+HairEye_raw <- HairEyeColor
+HairEye_raw <- data.frame(HairEye_raw)
+HairEye <- HairEye_raw[rep(1:nrow(HairEye_raw), HairEye_raw$Freq), ]
+## Remove the Freq column since each row now represents 1 individual instance
+HairEye$Freq <- NULL
+HairEye[] <- lapply(HairEye, as.factor)
+
+## https://archive.ics.uci.edu/dataset/19/car+evaluation 
+path = "" ## add path after downloading the dataset above
+car_data <- read.csv(path, header = FALSE)
+colnames(car_data) <- c("buying", "maint", "doors", "persons", "lug_boot", "safety", "class")
+car_data <- data.frame(car_data)
+car_data[] <- lapply(car_data, as.factor)
+
+## https://www.kaggle.com/datasets/shivachandel/kc-house-data
+path2 = "" ## add path after downloading the dataset above
+house_data <- read.csv(path2, header = TRUE)
+house_data <-data.frame(house_data)
+house_data$price <- house_data$price / 1000 ## convert to k$
+house_clean <- na.omit(house_data) ## very small percentage of one attribute (sqft_above) contains NA's (2 instances omitted)
+House_pattern <- c(1,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)
+house_missing <- ampute(house_clean, prop = 0.1, patterns = House_pattern, mech = "MCAR")
+house_missing$amp
+
+## Amputing 10% of the target attributes  ####
+HairEye_pattern <- c(1, 1, 0) ## ampute from sex
+HairEye_missing <- ampute(HairEye, prop =0.1, patterns = HairEye_pattern, mech="MCAR")
+HairEye_missing$amp
+## the amp contains the dataset with missing values
+
+Car_pattern <- c(1,1,1,1,1,1,0) ## ampute from class
+car_missing <- ampute(car_data, prop = 0.1, patterns = Car_pattern, mech = "MCAR")
+car_missing$amp
+
+
+## SICE ####
+
+sice_categorical <- function(data, m = 5, method_in_mice) {
+  #' SICE-Categorical Implementation
+  
+  # Identify rows with missing values (x) and columns containing missing values
+  missing_rows <- which(!complete.cases(data))
+  missing_cols <- names(data)[colSums(is.na(data)) > 0]
+  
+  if (length(missing_rows) == 0) {
+    message("No missing values found in the dataset.")
+    return(data)
+  }
+  
+  # Run MICE m times
+  imp <- mice(data, m = m, method = method_in_mice, printFlag = FALSE)
+  
+  # Helper function to find the statistical mode for categorical data
+  get_mode <- function(v) {
+    v <- as.character(v)
+    uniqv <- unique(v)
+    uniqv[which.max(tabulate(match(v, uniqv)))]
+  }
+  
+  # Copy dataset to store updated results (x')
+  data_updated <- data
+  
+  # For each missing row/value, extract m results and compute Mode
+  for (r in missing_rows) {
+    for (col in missing_cols) {
+      if (is.na(data[r, col])) {
+        
+        # Extract the imputed value for this specific cell across all m datasets
+        imputed_values <- sapply(1:m, function(i) {
+          completed_df <- complete(imp, i)
+          completed_df[r, col]
+        })
+        
+        # Calculate Mode of the m imputations (SICEResult)
+        modal_val <- get_mode(imputed_values)
+        
+        # Convert back to factor level if necessary
+        if (is.factor(data[, col])) {
+          modal_val <- factor(modal_val, levels = levels(data[, col]))
+        }
+        
+        # Update dataset with SICEResult
+        data_updated[r, col] <- modal_val
+      }
+    }
+  }
+  
+  return(data_updated)
+}
+
+sice_numeric <- function(data, m = 7, method_in_mice) {
+  #' SICE-Categorical Implementation
+  
+  # Identify rows with missing values (x) and columns containing missing values
+  missing_rows <- which(!complete.cases(data))
+  missing_cols <- names(data)[colSums(is.na(data)) > 0]
+  
+  if (length(missing_rows) == 0) {
+    message("No missing values found in the dataset.")
+    return(data)
+  }
+  
+  # Run MICE m times
+  imp <- mice(data, m = m, method = method_in_mice, printFlag = FALSE)
+  
+  completed_list <- complete(imp, action = "all")
+  
+  # Copy dataset to store updated results
+  data_updated <- data
+  
+  # 3. Fast loop querying the pre-extracted list
+  for (r in missing_rows) {
+    for (col in missing_cols) {
+      if (is.na(data[r, col])) {
+        
+        # Pull the value from each completed dataset in the list (blazing fast)
+        imputed_values <- sapply(1:m, function(i) {
+          completed_list[[i]][r, col]
+        })
+        
+        # Calculate mean
+        mean_val <- mean(as.numeric(imputed_values), na.rm = TRUE)
+        
+        # Update dataset
+        data_updated[r, col] <- mean_val
+      }
+    }
+  }
+  
+  return(data_updated)
+}
+## binary imputation ####
+## using LogReg and PMM
+HairEye_imputed_pmm <- sice_categorical(HairEye_missing$amp, m=7, method_in_mice = "pmm")
+HairEye_imputed_logreg <- sice_categorical(HairEye_missing$amp, m=7, method_in_mice = "logreg")
+
+HairEye_mice_pmm <- mice(HairEye_missing$amp, m=1, method ="pmm")
+HairEye_mice_pmm_sex <- complete(HairEye_mice_pmm, 1)$Sex
+HairEye_mice_logreg <- mice(HairEye_missing$amp, m=1, method ="logreg")
+HairEye_mice_logreg_sex <- complete(HairEye_mice_logreg, 1)$Sex
+
+## ordinal imputation ####
+
+Car_imputed_pmm <- sice_categorical(car_missing$amp, m=7, method_in_mice="pmm")
+Car_imputed_polyreg <- sice_categorical(car_missing$amp, m=7, method_in_mice="polyreg")
+Car_imputed_CART <- sice_categorical(car_missing$amp, m=7, method_in_mice= "cart")
+Car_imputed_LDA <- sice_categorical(car_missing$amp, m=7, method_in_mice="lda")
+
+car_amp <- car_missing$amp
+Car_imputed_mice_pmm <- mice(car_amp, m=1, method ="pmm")
+car_mice_pmm_class <- complete(Car_imputed_mice_pmm, 1)$class
+Car_imputed_mice_polyreg <- mice(car_amp, m=1, method ="polyreg")
+car_mice_polyreg_class <- complete(Car_imputed_mice_polyreg, 1)$class
+Car_imputed_mice_cart <- mice(car_amp, m=1, method ="cart")
+car_mice_cart_class <- complete(Car_imputed_mice_cart, 1)$class
+Car_imputed_mice_lda <- mice(car_amp, m=1, method ="lda")
+car_mice_lda_class <- complete(Car_imputed_mice_lda, 1)$class
+
+## numeric imputation ####
+House_imputed_cart <- sice_numeric(house_missing$amp, m=3, method_in_mice = "cart") # m default is 7, but caused memory limit error
+House_imputed_blr <- sice_numeric(house_missing$amp, m=3, method_in_mice = "norm") # norm is the name for blr in mice
+## gives error, not been able to resolve yet
+
+## knn for numerical imputation ####
+
+# k = 5 means it looks at the 5 nearest neighbors
+# imp_var = FALSE keeps it clean by not adding extra tracking columns
+house_knn_imputed <- kNN(house_missing$amp, k = 5, imp_var = FALSE)
+knn_pred_price <- house_knn_imputed$price
+rmse_house_knn <- sqrt(mean((house_clean$price - knn_pred_price)^2, na.rm = TRUE))
+print(paste("KNN Imputation RMSE for Price:", rmse_house_knn))
+
+## Comparisons with the actual datasets !! ####
+## binary evaluatuon ####
+accu_hair_sice_logreg <- mean(HairEye$Sex == HairEye_imputed_logreg$Sex, na.rm=TRUE)
+accu_hair_sice_pmm <-mean(HairEye$Sex == HairEye_imputed_pmm$Sex, na.rm=TRUE)
+accu_hair_mice_logreg <- mean(HairEye$Sex == HairEye_mice_logreg_sex, na.rm=TRUE)
+accu_hair_mice_pmm <-mean(HairEye$Sex == HairEye_mice_pmm_sex, na.rm=TRUE)
+accuracy_HairEye <- data.frame(
+  "Method" = c("sice(logreg)", "mice(logreg)", "sice(pmm)", "mice(pmm)"),
+  "Accuracy" = c(accu_hair_sice_logreg, accu_hair_mice_logreg, 
+                 accu_hair_sice_pmm, accu_hair_mice_pmm)
+)
+accuracy_HairEye$Accuracy <- (accuracy_HairEye$Accuracy-0.9 ) *10
+
+
+## ordinal evaluation ####
+accu_car_sice_pmm <- mean(car_data$class == Car_imputed_pmm$class, na.rm = TRUE)
+accu_car_mice_pmm <- mean(car_data$class == car_mice_pmm_class, na.rm = TRUE)
+accu_car_sice_polyreg<- mean(car_data$class == Car_imputed_polyreg$class, na.rm = TRUE)
+accu_car_mice_polyreg<-mean(car_data$class == car_mice_polyreg_class, na.rm = TRUE)
+accu_car_sice_cart<- mean(car_data$class == Car_imputed_CART$class, na.rm = TRUE)
+accu_car_mice_cart<- mean(car_data$class == car_mice_cart_class, na.rm = TRUE)
+accu_car_sice_lda<- mean(car_data$class == Car_imputed_LDA$class, na.rm = TRUE)
+accu_car_mice_lda<- mean(car_data$class == car_mice_lda_class, na.rm = TRUE)
+accuracy_car <- data.frame(
+  "Method" = c( "sice(pmm)", "mice(pmm)", 
+                "sice(polyreg)", "mice(polyreg)", 
+                "sice(CART)","mice(CART)", 
+                "sice(LDA)","mice(LDA)"),
+  "Accuracy"= c(accu_car_sice_pmm,accu_car_mice_pmm,
+                accu_car_sice_polyreg,accu_car_mice_polyreg,
+                accu_car_sice_cart,accu_car_mice_cart,
+                accu_car_sice_lda,accu_car_mice_lda)
+)
+accuracy_car$Accuracy <- (accuracy_car$Accuracy-0.9)*10
+
+## numeric evaluation ####
+house_mice_cart <- mice(house_missing$amp, method = "cart", m=1)
+house_mice_cart_price <- complete(house_mice_cart, 1)$price
+
+house_cart_obspred <- data.frame(obs=house_clean$price, pred=House_imputed_cart$price)
+rmse_house_cart <- sqrt(mean((house_cart_obspred$obs - house_cart_obspred$pred)^2, na.rm = TRUE))
+rmse_house_cart_mice <- sqrt(mean((house_cart_obspred$obs - house_mice_cart_price)^2, na.rm = TRUE))
+
+rmse_house <- data.frame(
+  Method = c("sice(cart)", "mice(cart)", "kNN"),
+  RMSE = c(rmse_house_cart, rmse_house_cart_mice, rmse_house_knn)
+)
+
+## plots for evaluation ####
+accuracy_HairEye$Method <- factor(accuracy_HairEye$Method, levels = unique(accuracy_HairEye$Method))
+plot_binary <- ggplot(data= accuracy_HairEye, mapping=aes(x=Method, y=Accuracy, fill=Method))+
+  geom_col(show.legend = FALSE) + 
+  geom_text(
+    aes(label = round(Accuracy, 5)), 
+    vjust = 1.5, 
+    size = 2.5,            # Fixed font size (removed it from aes mapping)
+    angle = 0,            # Adjusted angle slightly so it's readable
+    hjust = 0.5           # Aligned text for the angle
+  ) + 
+  coord_cartesian(ylim = c(0, 1.0)) +
+  labs(
+    title = "Accuracy for Imputation Methods for Binary Attributes (Sex)",
+    subtitle = "Compare with figure 5 and 6",
+    x = "Method",
+    y = "Accuracy"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8), # Tilt x-labels cleanly
+    plot.title = element_text(face = "bold", size = 10)
+  )
+
+accuracy_car$Method <- factor(accuracy_car$Method, levels = unique(accuracy_car$Method))
+plot_ordinal <- ggplot(data = accuracy_car, mapping = aes(x = Method, y = Accuracy, fill = Method)) +
+  geom_col(width = 0.6, show.legend = FALSE) + # Removed redundant legend
+  geom_text(
+    aes(label = round(Accuracy, 5)), 
+    vjust = 1.5, 
+    size = 2.5,            # Fixed font size (removed it from aes mapping)
+    angle = 0,            # Adjusted angle slightly so it's readable
+    hjust = 0.5           # Aligned text for the angle
+  ) + 
+  coord_cartesian(ylim = c(0, 1.0)) + # Adds headroom above bars so labels don't clip
+  labs(
+    title = "Accuracy for Imputation Methods for Ordinal Attributes",
+    subtitle = "compare with table 10",
+    x = "Method",
+    y = "Accuracy"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8), # Tilt x-labels cleanly
+    plot.title = element_text(face = "bold", size = 10)
+  )
+
+rmse_house$Method <- factor(rmse_house$Method, levels = unique(rmse_house$Method))
+
+plot_numeric <- ggplot(data=rmse_house, mapping = aes(x=Method, y =RMSE, fill = Method)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = round(RMSE, 2)), 
+            vjust = 1.5, 
+            size = 2.5,            # Fixed font size (removed it from aes mapping)
+            angle = 0,            # Adjusted angle slightly so it's readable
+            hjust = 0.5           # Aligned text for the angle
+  ) + 
+  labs(
+    title = "RMSE Comparison between Imputation Methods for Numeric Values",
+    subtitle = "Compare with figure 9",
+    x = "Method",
+    y = "RMSE"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8), # Tilt x-labels cleanly
+    plot.title = element_text(face = "bold", size = 8)
+  )
+
+plot_binary
+plot_ordinal
+plot_numeric
